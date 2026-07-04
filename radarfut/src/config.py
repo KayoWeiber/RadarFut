@@ -4,8 +4,12 @@ Todos os parâmetros ajustáveis do protótipo ficam neste arquivo para
 facilitar experimentação sem precisar mexer na lógica.
 """
 
+import json
+import os
+
 # Região da tela a ser capturada (em pixels, coordenadas absolutas do monitor).
-# Ajuste esses valores para cobrir a área onde o vídeo/jogo está sendo exibido.
+# Ajuste esses valores para cobrir a área onde o vídeo/jogo está sendo exibido,
+# ou gere-os automaticamente rodando `python region_selector.py`.
 CAPTURE_LEFT = 0
 CAPTURE_TOP = 0
 CAPTURE_WIDTH = 1280
@@ -40,33 +44,40 @@ MAX_ASPECT_RATIO = 4.5
 
 # ROI (region of interest) do gramado dentro do frame capturado, em pixels
 # relativos ao frame (não ao monitor). Serve para ignorar torcida, HUD,
-# placar e propaganda ao converter posições para o minimapa. É uma
-# aproximação manual enquanto não há detecção robusta do campo — ajuste
-# conforme o enquadramento da transmissão/jogo.
+# placar e propaganda ao converter posições para o minimapa e para restringir
+# a detecção de jogadores. É uma aproximação manual enquanto não há detecção
+# robusta do campo — ajuste conforme o enquadramento da transmissão/jogo, ou
+# gere automaticamente rodando `python region_selector.py`.
 FIELD_ROI_TOP = 180
 FIELD_ROI_BOTTOM = 720
 FIELD_ROI_LEFT = 0
 FIELD_ROI_RIGHT = 1280
 
-# Faixas HSV dos uniformes dos dois times, usadas para classificar cada
-# detecção com base em cor conhecida em vez de apenas agrupar por k-means.
-# Ajuste conforme as cores reais dos times da partida/vídeo.
-TEAM_A_HSV_MIN = (0, 90, 60)
-TEAM_A_HSV_MAX = (10, 255, 255)
+# Se existir um region_config.json (gerado por region_selector.py), ele
+# sobrescreve os valores de captura e ROI acima. Mantém config.py como fonte
+# única de verdade em runtime, sem exigir edição manual após a calibração.
+_REGION_CONFIG_PATH = os.path.join(os.path.dirname(__file__), "region_config.json")
+if os.path.exists(_REGION_CONFIG_PATH):
+    with open(_REGION_CONFIG_PATH, "r", encoding="utf-8") as _f:
+        _region_overrides = json.load(_f)
+    CAPTURE_LEFT = _region_overrides.get("CAPTURE_LEFT", CAPTURE_LEFT)
+    CAPTURE_TOP = _region_overrides.get("CAPTURE_TOP", CAPTURE_TOP)
+    CAPTURE_WIDTH = _region_overrides.get("CAPTURE_WIDTH", CAPTURE_WIDTH)
+    CAPTURE_HEIGHT = _region_overrides.get("CAPTURE_HEIGHT", CAPTURE_HEIGHT)
+    FIELD_ROI_LEFT = _region_overrides.get("FIELD_ROI_LEFT", FIELD_ROI_LEFT)
+    FIELD_ROI_TOP = _region_overrides.get("FIELD_ROI_TOP", FIELD_ROI_TOP)
+    FIELD_ROI_RIGHT = _region_overrides.get("FIELD_ROI_RIGHT", FIELD_ROI_RIGHT)
+    FIELD_ROI_BOTTOM = _region_overrides.get("FIELD_ROI_BOTTOM", FIELD_ROI_BOTTOM)
 
-TEAM_B_HSV_MIN = (0, 0, 180)
-TEAM_B_HSV_MAX = (180, 60, 255)
-
-# Cores fixas de renderização no minimapa (BGR), independentes da cor real
-# do uniforme detectado — o objetivo é manter a leitura visual estável.
+# Times são classificados automaticamente em 2 clusters de cor por frame
+# (k-means sobre a cor média do uniforme de cada detecção), já que faixas
+# HSV fixas não se adaptam a uniformes diferentes de cada partida/vídeo.
+# Cores fixas de renderização no minimapa (BGR): o cluster não tem uma
+# identidade estável entre frames, então mapeamos por histórico (ver
+# team_classifier.py) para decidir qual cluster vira "team_a"/"team_b".
 TEAM_A_MINIMAP_COLOR = (0, 0, 255)     # vermelho
 TEAM_B_MINIMAP_COLOR = (255, 200, 0)   # azul claro
 UNKNOWN_MINIMAP_COLOR = (0, 255, 255)  # amarelo
-
-# Confiança mínima (distância normalizada até o centro do time mais próximo)
-# para aceitar a classificação de cor no frame atual. Abaixo disso, mantém a
-# última classificação conhecida do jogador para evitar flickering.
-CLASSIFICATION_CONFIDENCE_MIN = 0.55
 
 # Quantidade de frames de histórico usada para suavizar a classificação de
 # cada jogador rastreado por proximidade entre frames.

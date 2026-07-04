@@ -1,11 +1,13 @@
 """Classificação de jogadores em dois times, com estabilização entre frames.
 
-A classificação por frame é feita comparando a cor média do uniforme com as
-faixas HSV configuradas para cada time. Como isso pode falhar frame a frame
-(iluminação, movimento, compressão do vídeo), mantemos um histórico curto
-por jogador — pareado entre frames pela proximidade do centro da detecção —
-e só trocamos a classificação quando há confiança suficiente. Isso evita o
-"piscar" de cor no minimapa.
+Não há faixas de cor fixas por time (uniformes variam a cada partida/vídeo):
+a cada frame agrupamos as detecções em 2 clusters de cor via k-means. O
+problema é que o rótulo do cluster (0 ou 1) não tem identidade estável entre
+frames — o k-means pode inverter os rótulos de um frame para o outro. Para
+resolver isso, mantemos a cor média de referência de cada time ao longo do
+tempo e, a cada frame, associamos cada cluster ao time de referência mais
+próximo antes de aplicar o histórico por jogador (que evita o "piscar"
+individual de cada detecção).
 """
 
 from collections import deque
@@ -16,36 +18,57 @@ import numpy as np
 import config
 
 _tracked_players: list[dict] = []
+_team_reference_colors: dict[str, np.ndarray] = {}
 
 
-def _dominant_color_hsv(frame: np.ndarray, bbox: tuple[int, int, int, int]) -> np.ndarray:
+def _dominant_color(frame: np.ndarray, bbox: tuple[int, int, int, int]) -> np.ndarray:
     x, y, w, h = bbox
     roi = frame[y:y + h, x:x + w]
     if roi.size == 0:
         return np.array([0, 0, 0], dtype=np.float32)
-    hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-    return hsv_roi.reshape(-1, 3).mean(axis=0)
+    return roi.reshape(-1, 3).mean(axis=0)
 
 
-def _match_score(color: np.ndarray, hsv_min: tuple, hsv_max: tuple) -> float:
-    """Retorna quão bem `color` cabe dentro da faixa [hsv_min, hsv_max], em 0..1."""
-    hsv_min = np.array(hsv_min, dtype=np.float32)
-    hsv_max = np.array(hsv_max, dtype=np.float32)
-    center = (hsv_min + hsv_max) / 2.0
-    half_range = np.maximum((hsv_max - hsv_min) / 2.0, 1.0)
-
-    normalized_distance = np.abs(color - center) / half_range
-    score = 1.0 - np.clip(normalized_distance, 0.0, 1.0).mean()
-    return float(score)
+def _cluster_colors(colors: np.ndarray) -> np.ndarray:
+    criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 10, 1.0)
+    _, labels, centers = cv2.kmeans(colors, 2, None, criteria, 3, cv2.KMEANS_RANDOM_CENTERS)
+    return labels.flatten(), centers
 
 
-def _classify_by_color(color: np.ndarray) -> tuple[str, float]:
-    score_a = _match_score(color, config.TEAM_A_HSV_MIN, config.TEAM_A_HSV_MAX)
-    score_b = _match_score(color, config.TEAM_B_HSV_MIN, config.TEAM_B_HSV_MAX)
+def _assign_clusters_to_teams(cluster_centers: np.ndarray) -> dict[int, str]:
+    """Decide qual cluster (0 ou 1) corresponde a team_a/team_b.
 
-    if score_a >= score_b:
-        return "team_a", score_a
-    return "team_b", score_b
+    Na primeira vez que rodamos, não há referência: usamos a ordem natural do
+    k-means. Nas próximas vezes, associamos cada cluster ao time cuja cor de
+    referência está mais próxima, evitando que os rótulos invertam de frame
+    para frame.
+    """
+    if "team_a" not in _team_reference_colors or "team_b" not in _team_reference_colors:
+        return {0: "team_a", 1: "team_b"}
+
+    ref_a = _team_reference_colors["team_a"]
+    ref_b = _team_reference_colors["team_b"]
+
+    dist_0_a = np.linalg.norm(cluster_centers[0] - ref_a)
+    dist_0_b = np.linalg.norm(cluster_centers[0] - ref_b)
+
+    if dist_0_a <= dist_0_b:
+        return {0: "team_a", 1: "team_b"}
+    return {0: "team_b", 1: "team_a"}
+
+
+def _update_reference_colors(cluster_centers: np.ndarray, cluster_to_team: dict[int, str]) -> None:
+    # Média móvel simples para acompanhar mudanças lentas (iluminação) sem
+    # perder a identidade do time de um frame para o outro.
+    smoothing = 0.8
+    for cluster_index, team in cluster_to_team.items():
+        new_color = cluster_centers[cluster_index]
+        if team in _team_reference_colors:
+            _team_reference_colors[team] = (
+                smoothing * _team_reference_colors[team] + (1 - smoothing) * new_color
+            )
+        else:
+            _team_reference_colors[team] = new_color
 
 
 def _find_tracked_match(center: tuple[int, int]) -> dict | None:
@@ -62,23 +85,30 @@ def _find_tracked_match(center: tuple[int, int]) -> dict | None:
 def classify_teams(frame: np.ndarray, detections: list[dict]) -> list[dict]:
     global _tracked_players
 
+    if len(detections) < 2:
+        for detection in detections:
+            detection["team"] = "unknown"
+        _tracked_players = []
+        return detections
+
+    colors = np.array(
+        [_dominant_color(frame, d["bbox"]) for d in detections],
+        dtype=np.float32,
+    )
+    labels, cluster_centers = _cluster_colors(colors)
+    cluster_to_team = _assign_clusters_to_teams(cluster_centers)
+    _update_reference_colors(cluster_centers, cluster_to_team)
+
     updated_tracked = []
 
-    for detection in detections:
-        color = _dominant_color_hsv(frame, detection["bbox"])
-        team_guess, confidence = _classify_by_color(color)
+    for detection, label in zip(detections, labels):
+        team_guess = cluster_to_team[int(label)]
 
         tracked = _find_tracked_match(detection["center"])
         history = tracked["history"] if tracked else deque(maxlen=config.CLASSIFICATION_HISTORY_SIZE)
+        history.append(team_guess)
 
-        if confidence >= config.CLASSIFICATION_CONFIDENCE_MIN:
-            history.append(team_guess)
-
-        if history:
-            stable_team = max(set(history), key=history.count)
-        else:
-            stable_team = "unknown"
-
+        stable_team = max(set(history), key=history.count)
         detection["team"] = stable_team
 
         updated_tracked.append({

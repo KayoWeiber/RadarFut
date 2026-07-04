@@ -24,12 +24,13 @@ def detect_field_lines(frame: np.ndarray) -> list[tuple[int, int, int, int]]:
     if roi_frame.size == 0:
         return []
 
-    gray = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    hsv = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2HSV)
+    blurred = cv2.GaussianBlur(hsv, (5, 5), 0)
 
-    # Linhas do campo são claras/brancas e contrastam com o gramado verde,
-    # então um limiar alto em escala de cinza já isola boa parte delas.
-    _, white_mask = cv2.threshold(blurred, 170, 255, cv2.THRESH_BINARY)
+    # Linhas do campo são quase brancas: baixa saturação e alto valor. Usar
+    # HSV em vez de só limiar em cinza evita confundir gramado claro/brilhoso
+    # com as linhas de fato.
+    white_mask = cv2.inRange(blurred, (0, 0, 180), (180, 60, 255))
     edges = cv2.Canny(white_mask, 50, 150)
 
     raw_lines = cv2.HoughLinesP(

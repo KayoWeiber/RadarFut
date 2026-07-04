@@ -29,8 +29,31 @@ pip install -r requirements.txt
 
 ## Configurando a região de captura
 
-Abra `src/config.py` e ajuste os valores conforme a posição/tamanho da
-janela onde o vídeo ou jogo está sendo exibido na sua tela:
+A forma recomendada é usar o seletor visual: ele tira um screenshot do
+monitor, você arrasta o mouse para marcar a região onde o vídeo/jogo está
+sendo exibido e depois marca a área útil do gramado dentro dela. Os valores
+são salvos em `src/region_config.json` e carregados automaticamente por
+`config.py` (sobrescrevendo os valores fixos do arquivo).
+
+```bash
+cd src
+python region_selector.py
+```
+
+Passo a passo:
+
+1. Uma janela abre com o monitor inteiro. Arraste um retângulo cobrindo a
+   janela do vídeo/jogo e pressione ENTER (ou ESPAÇO) para confirmar.
+2. Uma segunda janela abre já recortada nessa região. Arraste um retângulo
+   cobrindo **apenas o gramado**, excluindo arquibancada, HUD, placar e
+   propaganda, e confirme novamente.
+3. Os valores são gravados em `region_config.json`. Para recalibrar, basta
+   rodar o script de novo (ele sobrescreve o arquivo).
+
+`region_config.json` é local à sua máquina e está no `.gitignore`.
+
+Alternativamente, é possível editar `src/config.py` diretamente e ajustar
+os valores manualmente (coordenadas absolutas em pixels do monitor):
 
 ```python
 CAPTURE_LEFT = 0
@@ -39,10 +62,9 @@ CAPTURE_WIDTH = 1280
 CAPTURE_HEIGHT = 720
 ```
 
-Esses valores são coordenadas absolutas em pixels do monitor. Uma forma
-simples de descobrir os valores certos é usar uma ferramenta de captura de
-tela (como a Ferramenta de Captura do Windows) para identificar a posição e
-o tamanho da janela do vídeo/jogo.
+Note que, se existir um `region_config.json`, ele tem prioridade sobre os
+valores escritos em `config.py` — apague o arquivo para voltar a usar os
+valores fixos.
 
 Também é possível ajustar em `config.py`:
 
@@ -55,45 +77,34 @@ Também é possível ajustar em `config.py`:
 ### Região útil do campo (ROI)
 
 Como ainda não há detecção robusta do campo nem homografia, a conversão de
-posição para o minimapa usa uma área útil do gramado configurada
-manualmente:
+posição para o minimapa — e a própria detecção de jogadores — usa uma área
+útil do gramado (`FIELD_ROI_TOP/BOTTOM/LEFT/RIGHT`). O jeito recomendado de
+definir isso é o `region_selector.py` (acima); os valores em `config.py`
+são apenas o padrão usado quando não há `region_config.json`.
 
-```python
-FIELD_ROI_TOP = 180
-FIELD_ROI_BOTTOM = 720
-FIELD_ROI_LEFT = 0
-FIELD_ROI_RIGHT = 1280
-```
-
-Ajuste esses valores para cobrir apenas o gramado visível no frame
-capturado, excluindo torcida, HUD, placar e propaganda. Com
-`DEBUG_DRAW_FIELD_ROI = True`, a ROI é desenhada em magenta na janela de
-captura para facilitar o ajuste.
+Com `DEBUG_DRAW_FIELD_ROI = True`, a ROI é desenhada em magenta na janela
+de captura para facilitar a conferência.
 
 ### Cores dos times
 
-Os times são classificados comparando a cor média do uniforme com faixas
-HSV configuráveis:
+Não há faixas de cor fixas por time no `config.py`: a cada frame, os
+jogadores detectados são agrupados em 2 clusters de cor via k-means sobre a
+cor média do uniforme, o que se adapta automaticamente a qualquer par de
+uniformes sem precisar configurar HSV manualmente.
 
-```python
-TEAM_A_HSV_MIN = (0, 90, 60)
-TEAM_A_HSV_MAX = (10, 255, 255)
+O problema é que o k-means não garante que o "cluster 0" de um frame seja o
+mesmo time do "cluster 0" do frame seguinte. Para evitar que as cores dos
+times troquem ou "pisquem" na tela, `team_classifier.py`:
 
-TEAM_B_HSV_MIN = (0, 0, 180)
-TEAM_B_HSV_MAX = (180, 60, 255)
-```
+- mantém uma cor de referência (média móvel) para `team_a` e `team_b` e
+  associa cada cluster do frame atual ao time de referência mais próximo;
+- mantém um histórico curto por jogador (pareado entre frames por
+  proximidade do centro, via `TRACKING_MAX_DISTANCE`) e usa a classificação
+  mais frequente nesse histórico (`CLASSIFICATION_HISTORY_SIZE`) em vez da
+  leitura isolada do frame atual.
 
-Os valores padrão são apenas um ponto de partida (tons avermelhados vs.
-tons claros/brancos) e devem ser ajustados conforme os uniformes reais da
-partida ou vídeo. A cor exibida no minimapa é fixa
-(`TEAM_A_MINIMAP_COLOR` / `TEAM_B_MINIMAP_COLOR`), independente da cor real
-detectada, para manter a leitura visual estável.
-
-Para reduzir o "piscar" de classificação entre frames, a detecção atual é
-pareada com detecções do frame anterior por proximidade
-(`TRACKING_MAX_DISTANCE`) e mantém um pequeno histórico
-(`CLASSIFICATION_HISTORY_SIZE`), só trocando de time quando a confiança da
-cor (`CLASSIFICATION_CONFIDENCE_MIN`) é suficiente.
+A cor exibida no minimapa é fixa (`TEAM_A_MINIMAP_COLOR` /
+`TEAM_B_MINIMAP_COLOR`), independente da cor real do uniforme.
 
 ### Modo debug
 
@@ -108,9 +119,10 @@ DEBUG_SHOW_FPS = True           # FPS atual no canto da janela
 
 ## Como executar
 
-1. Abra o vídeo, transmissão, replay ou jogo de futebol na tela, na região
-   configurada em `config.py`.
-2. Execute o script principal:
+1. Abra o vídeo, transmissão, replay ou jogo de futebol na tela.
+2. (Recomendado) Calibre a região rodando `python region_selector.py` uma
+   vez — veja a seção acima.
+3. Execute o script principal:
 
 ```bash
 cd src
@@ -129,8 +141,9 @@ radarfut/
 ├── src/
 │   ├── main.py               # ponto de entrada
 │   ├── config.py             # configuração central
+│   ├── region_selector.py    # calibração visual da captura e da ROI do campo
 │   ├── screen_capture.py     # captura de tela via MSS
-│   ├── player_detector.py    # detecção de jogadores por cor/contorno
+│   ├── player_detector.py    # detecção de jogadores por cor/contorno (dentro da ROI)
 │   ├── team_classifier.py    # classificação em dois times, com estabilização
 │   ├── field_mapper.py       # ROI do campo, linhas detectadas e projeção
 │   ├── minimap_renderer.py   # desenho do minimapa 2D
@@ -142,25 +155,29 @@ radarfut/
 
 Fluxo por frame, executado em loop dentro de `main.py`:
 
-1. **`screen_capture.py`** captura a região configurada da tela via MSS e
+1. **`region_selector.py`** (rodado uma vez, separado do loop principal)
+   deixa o usuário marcar visualmente a região de captura e a ROI do
+   gramado, salvando em `region_config.json`.
+2. **`screen_capture.py`** captura a região configurada da tela via MSS e
    converte para um array BGR compatível com OpenCV.
-2. **`player_detector.py`** converte o frame para HSV, isola tudo que não
-   corresponde à cor do gramado, encontra contornos e filtra por área e
-   proporção para reduzir ruído. Retorna bounding boxes e centros
-   aproximados dos "jogadores" detectados.
-3. **`team_classifier.py`** compara a cor média de cada detecção com as
-   faixas HSV configuradas para cada time, e usa um histórico curto
-   (pareado entre frames por proximidade do centro) para manter a
-   classificação estável mesmo quando a leitura de cor do frame atual é
-   incerta.
-4. **`field_mapper.py`** define a ROI do gramado (excluindo torcida, HUD e
+3. **`player_detector.py`** recorta o frame pela ROI do campo, converte para
+   HSV, isola tudo que não corresponde à cor do gramado, encontra contornos
+   e filtra por área e proporção para reduzir ruído. Retorna bounding boxes
+   e centros aproximados dos "jogadores" detectados, já em coordenadas do
+   frame completo.
+4. **`team_classifier.py`** agrupa as detecções do frame em 2 clusters de
+   cor (k-means), associa cada cluster ao time de referência mais próximo
+   (para não inverter os rótulos entre frames) e usa um histórico curto por
+   jogador (pareado entre frames por proximidade do centro) para manter a
+   classificação estável.
+5. **`field_mapper.py`** define a ROI do gramado (excluindo torcida, HUD e
    placar), detecta linhas brancas do campo via Hough para fins de debug, e
    projeta a posição de um jogador para coordenadas relativas (0..1) dentro
    dessa ROI — a base para uma futura homografia.
-5. **`minimap_renderer.py`** desenha o campo (bordas, linha central, círculo
+6. **`minimap_renderer.py`** desenha o campo (bordas, linha central, círculo
    central, áreas), escala a posição relativa de cada jogador para o
    retângulo do minimapa e mostra a contagem de jogadores por time.
-6. **`main.py`** orquestra o loop, exibe o frame anotado (com debug opcional
+7. **`main.py`** orquestra o loop, exibe o frame anotado (com debug opcional
    de linhas/ROI/FPS) e o minimapa em janelas OpenCV separadas, e controla o
    encerramento via tecla `q`.
 
@@ -173,41 +190,41 @@ alterar o restante do pipeline).
 
 - A detecção de jogadores não usa reconhecimento real de pessoas — é uma
   segmentação simples por contraste de cor com o gramado, então pode
-  facilmente confundir linhas do campo, sombras, placar, torcida e outros
-  elementos de interface com jogadores.
+  confundir linhas do campo, sombras e outros elementos de contraste com
+  jogadores, mesmo estando restrita à ROI do gramado.
 - A posição no minimapa é proporcional à posição do jogador **dentro da ROI
-  configurada do campo**, não à posição real dele no gramado. Sem
-  homografia, isso ainda é uma aproximação visual, apenas menos distorcida
-  por elementos fora do campo.
-- Câmeras dinâmicas (zoom, corte, replay) ainda distorcem as posições
-  relativas, já que não há calibração de perspectiva nem homografia.
+  do campo**, não à posição real dele no gramado. Sem homografia, isso
+  ainda é uma aproximação visual — a câmera dinâmica (zoom, corte, replay,
+  movimento de acompanhamento da bola) distorce a proporção real entre
+  distância na tela e distância no campo, e essa versão não corrige isso.
+- A ROI do campo é fixa por execução: se a câmera mudar de enquadramento de
+  forma relevante durante a partida/vídeo, pode ser necessário recalibrar
+  com `region_selector.py`.
 - A detecção de linhas do campo depende da qualidade da imagem e serve por
   enquanto apenas como referência visual de debug — ainda não é usada para
   calibrar a projeção automaticamente.
-- HUD, placar, torcida e propagandas fora da ROI configurada não entram no
-  cálculo, mas a ROI em si é definida manualmente e pode precisar de ajuste
-  por transmissão/jogo.
-- A classificação de times por cor depende da configuração correta das
-  faixas HSV de cada uniforme; times com cores muito próximas, iluminação
-  ruim ou compressão de vídeo podem gerar classificações erradas mesmo com
-  o histórico de estabilização.
+- A classificação de times por k-means depende de os dois uniformes terem
+  cores razoavelmente distintas; uniformes muito parecidos, iluminação ruim
+  ou compressão de vídeo podem gerar classificações erradas mesmo com a
+  estabilização por histórico e cor de referência.
 - O rastreamento entre frames usado para estabilizar a cor é ingênuo
-  (pareamento por distância do centro) e pode confundir jogadores próximos
-  entre si.
+  (pareamento por distância do centro) e pode confundir jogadores muito
+  próximos entre si ou que se movem rápido demais entre frames.
 
 ## Roadmap
 
 1. MVP com captura da tela e minimapa aproximado.
 2. Melhorar a detecção de jogadores.
 3. Mapeamento inicial do campo: ROI configurável, detecção de linhas em modo
-   debug e classificação de times estabilizada por histórico (esta versão).
-4. Adicionar um seletor visual da região de captura e da ROI do campo (em
-   vez de valores fixos em `config.py`).
-5. Adicionar rastreamento mais robusto entre frames.
-6. Separar times com maior precisão (ex.: clustering combinado com faixas
-   HSV, ou pequenos modelos de classificação).
+   debug e classificação de times estabilizada por histórico.
+4. Seletor visual da região de captura e da ROI do campo, e classificação de
+   times por k-means com cor de referência estável (esta versão).
+5. Adicionar rastreamento mais robusto entre frames (ex.: Hungarian
+   matching, filtros de movimento).
+6. Separar times com maior precisão (ex.: considerar goleiro/árbitro como
+   categorias à parte).
 7. Usar as linhas do campo detectadas para calibrar a projeção
-   automaticamente.
+   automaticamente, incluindo adaptação a mudanças de câmera.
 8. Aplicar homografia real para converter posições da imagem em
    coordenadas do campo.
 9. Criar um overlay desktop transparente.
